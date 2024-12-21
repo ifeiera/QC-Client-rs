@@ -1,0 +1,43 @@
+# Build directories
+/build/
+bin/
+lib/
+debug/
+release/
+
+# CMake files
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+
+# Rust target directory
+/target/
+*.json
+*.TAG
+
+# Rust specific files
+Cargo.lock
+
+# Visual Studio Code settings
+.vscode/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# Backup files
+*~
+*.bak
+*.swp
+
+# Other files
+*.user
+*.sublime-workspace
