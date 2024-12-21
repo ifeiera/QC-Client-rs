@@ -2,8 +2,6 @@
 
 ![License](https://img.shields.io/badge/license-MIT-blue) ![Version](https://img.shields.io/badge/version-0.1.0-purple) ![Rust](https://img.shields.io/badge/Rust-1.83.0-orange?logo=rust) ![C++](https://img.shields.io/badge/C++-17-brightgreen?logo=c%2B%2B)
 
-## Project Goal
-
 The Axioo QC System is designed to rapidly collect and transmit system information to a quality control (QC) website. This ensures that all devices meet the required standards before deployment, enhancing the quality control processes within Axioo's production environment.
 
 ## Project Structure
