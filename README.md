@@ -1,6 +1,6 @@
 # Axioo QC System
 
-![Build Status](https://img.shields.io/badge/build-passing-brightgreen) ![License](https://img.shields.io/badge/license-MIT-blue) ![Version](https://img.shields.io/badge/version-0.1.0-purple) ![Rust](https://img.shields.io/badge/Rust-1.83.0-orange?logo=rust) ![C++](https://img.shields.io/badge/C++-17-brightgreen?logo=c%2B%2B)
+![License](https://img.shields.io/badge/license-MIT-blue) ![Version](https://img.shields.io/badge/version-0.1.0-purple) ![Rust](https://img.shields.io/badge/Rust-1.83.0-orange?logo=rust) ![C++](https://img.shields.io/badge/C++-17-brightgreen?logo=c%2B%2B)
 
 ## Project Goal
 
