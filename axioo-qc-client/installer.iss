@@ -1,5 +1,5 @@
 ﻿#define MyAppName "Axioo QC System"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "0.1.0"
 #define MyAppPublisher "Axioo"
 #define MyAppExeName "Axioo QC System.exe"
 

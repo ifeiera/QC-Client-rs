@@ -2,7 +2,7 @@
 
 # Application configuration
 $APP_NAME = "Axioo QC System"
-$VERSION = "1.0.0"
+$VERSION = "0.1.0"
 
 # Configure static linking for release build
 $env:RUSTFLAGS = "-C target-feature=+crt-static"

@@ -10,7 +10,6 @@ The Axioo QC System is designed to rapidly collect and transmit system informati
 
 - **C++ Backend**: The core of the system is built in C++ to efficiently gather real-time system information. It uses [WMI (Windows Management Instrumentation)](https://docs.microsoft.com/en-us/windows/win32/wmisdk/wmi-start-page) for general system data and [DirectX](https://docs.microsoft.com/en-us/windows/win32/directx) for GPU details. The data is serialized into JSON format using the [nlohmann/json](https://github.com/nlohmann/json) library.
 - **Rust Integration**: The Rust layer captures the JSON data from the C++ backend and facilitates real-time communication with the frontend via WebSockets, using [serde_json](https://crates.io/crates/serde_json) for JSON handling.
-- **Frontend Interface**: A web-based frontend displays the system information in real-time, allowing users to monitor and verify device status.
 
 ## Features
 
