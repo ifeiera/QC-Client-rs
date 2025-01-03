@@ -15,6 +15,7 @@ set(SOURCES
     src/SystemInfoWrapper.cpp
     src/WMIHelper.cpp
     src/Logger.cpp
+    src/systeminfo.rc
 )
 
 # Include directories
@@ -26,6 +27,58 @@ include_directories(
 # Create shared library
 add_library(systeminfo ${SOURCES})
 
+# Add Windows version definition
+target_compile_definitions(systeminfo PRIVATE
+    WINVER=0x0601
+    _WIN32_WINNT=0x0601
+)
+
+# Set DLL properties
+set_target_properties(systeminfo PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    VERSION 0.1.0
+    SOVERSION 1
+    DESCRIPTION "System Information Collection Library for Windows"
+    COMPANY_NAME "Eterninety"
+    PRODUCT_NAME "System Information Collector"
+    LEGAL_COPYRIGHT "Copyright (c) 2024 Eterninety. All rights reserved."
+    ORIGINAL_FILENAME "systeminfo.dll"
+    FILE_DESCRIPTION "Collects detailed system hardware information including CPU, GPU, Memory, Storage, and Peripherals"
+)
+
+# Add post-build command to sign the DLL
+if(WIN32)
+    find_program(SIGNTOOL signtool.exe)
+    if(SIGNTOOL)
+        # Set certificate password directly (for development only)
+        set(CERT_PASSWORD "12317D()/")
+        
+        # Check if certificate exists
+        set(CERT_PATH "${CMAKE_SOURCE_DIR}/certs/EterninetyCert.pfx")
+        if(NOT EXISTS ${CERT_PATH})
+            message(WARNING "Certificate not found at: ${CERT_PATH}")
+            return()
+        endif()
+        message(STATUS "Found certificate at: ${CERT_PATH}")
+        
+        # Add signing command with direct password
+        add_custom_command(TARGET systeminfo POST_BUILD
+            COMMAND ${SIGNTOOL} sign /f "${CERT_PATH}"
+                                    /p "${CERT_PASSWORD}"
+                                    /fd SHA256
+                                    /t http://timestamp.digicert.com
+                                    /d "System Information Collector"
+                                    /du "https://eterninety.com"
+                                    $<TARGET_FILE:systeminfo>
+            COMMENT "Signing DLL with Eterninety certificate"
+            VERBATIM
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        )
+    endif()
+endif()
+
 # Windows specific libraries
 if(WIN32)
     target_link_libraries(systeminfo
@@ -36,6 +89,8 @@ if(WIN32)
         wbemuuid
         ole32
         oleaut32
+        Dxva2
+        setupapi
     )
 endif()
 

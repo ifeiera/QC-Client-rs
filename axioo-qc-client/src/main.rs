@@ -60,7 +60,7 @@ async fn run_server(shutdown: Arc<Notify>) -> Result<()> {
                 break;
             }
 
-            sleep(Duration::from_millis(100)).await;
+            sleep(Duration::from_millis(500)).await;
         }
     });
 
@@ -143,7 +143,7 @@ async fn handle_connection(
             }
         }
 
-        sleep(Duration::from_millis(1000)).await;
+        sleep(Duration::from_millis(100)).await;
     }
     Ok(())
 }
@@ -181,6 +181,29 @@ async fn main() -> Result<()> {
     println!("Initializing Axioo QC System...");
     init_library()?;
     register_callback()?;
+
+    if JSON_MODE {
+        // Display initial system information
+        println!("\nInitial System Information:");
+        match get_system_info() {
+            Ok(info) => {
+                // Pretty print the JSON with indentation
+                let parsed: serde_json::Value = serde_json::from_str(&info)?;
+                println!("{}", serde_json::to_string_pretty(&parsed)?);
+            },
+            Err(_) => {
+                eprintln!(
+                    "{} Error getting system info: {} - {}",
+                    Local::now().format("%H:%M:%S"),
+                    get_last_error(),
+                    get_error_message()
+                );
+            }
+        }
+        println!("\nPress Enter to continue...");
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+    }
 
     crossterm::terminal::enable_raw_mode()?;
 

@@ -2,7 +2,11 @@
 
 # Application configuration
 $APP_NAME = "Axioo QC System"
-$VERSION = "0.1.0"
+$VERSION = "0.2.0"
+
+# Certificate configuration
+$CERT_PATH = "..\certs\EterninetyCert.pfx"
+$CERT_PASSWORD = "12317D()/"
 
 # Configure static linking for release build
 $env:RUSTFLAGS = "-C target-feature=+crt-static"
@@ -20,6 +24,20 @@ $INSTALLER_DIR = "$RELEASE_DIR\installer"
 New-Item -ItemType Directory -Force -Path $PORTABLE_DIR
 New-Item -ItemType Directory -Force -Path $PORTABLE_UPX_DIR
 New-Item -ItemType Directory -Force -Path $INSTALLER_DIR
+
+# Sign the executable
+Write-Host "Signing executable..."
+$SIGNTOOL = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22000.0\x64\signtool.exe"
+if (Test-Path $SIGNTOOL) {
+    & $SIGNTOOL sign /f $CERT_PATH /p $CERT_PASSWORD /fd SHA256 /t http://timestamp.digicert.com /d "$APP_NAME" /du "https://eterninety.com" "target\release\axioo-qc-client.exe"
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "Executable signed successfully"
+    } else {
+        Write-Host "Failed to sign executable"
+    }
+} else {
+    Write-Host "SignTool not found. Skipping executable signing."
+}
 
 # Copy release files to output directories
 Copy-Item "target\release\axioo-qc-client.exe" -Destination "$PORTABLE_DIR\$APP_NAME.exe"
@@ -74,6 +92,9 @@ Name: "startupicon"; Description: "Start with Windows"; GroupDescription: "Windo
 
 [Files]
 Source: "$PORTABLE_DIR\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
+; Include Visual C++ Redistributable installers
+Source: "redist\VC_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
+Source: "redist\VC_redist.x86.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -81,6 +102,10 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: startupicon
 
 [Run]
+; Install Visual C++ Redistributable first
+Filename: "{tmp}\VC_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing Visual C++ 2015-2022 Redistributable (x64)..."; Flags: waituntilterminated
+Filename: "{tmp}\VC_redist.x86.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing Visual C++ 2015-2022 Redistributable (x86)..."; Flags: waituntilterminated
+; Then run the main application
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 "@
 

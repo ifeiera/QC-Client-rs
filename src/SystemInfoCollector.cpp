@@ -4,77 +4,230 @@
 #include <map>
 #include <algorithm>
 #include <iphlpapi.h>
+#include <vector>
+#include <setupapi.h>
+#include <initguid.h>
+#include <numeric>
+#include <cmath>
+#include <cfgmgr32.h>
+#include <physicalmonitorenumerationapi.h>
+#include <highlevelmonitorconfigurationapi.h>
+#include <lowlevelmonitorconfigurationapi.h>
+
+// Define EDID escape codes
+#ifndef GETEDID
+#define GETEDID 0x7940      // Standard EDID escape
+#define GETEDID_ALT1 0x6F14 // Alternative EDID escape 1
+#define GETEDID_ALT2 0x00EE // Alternative EDID escape 2
+#endif
 
 // Global variables
 extern std::mutex g_logMutex;
 extern LogCallback g_logCallback;
 
-namespace {
+namespace
+{
     // Helper functions for string sanitization and WMI operations
-    std::string sanitizeString(const std::string& input) {
-        if (input.empty()) return "N/A";
-        
+    std::string sanitizeString(const std::string &input)
+    {
+        if (input.empty())
+            return "N/A";
+
         std::string output;
         output.reserve(input.length());
-        
+
         // Only keep printable ASCII and valid UTF-8 characters
-        for (unsigned char c : input) {
-            if ((c >= 0x20 && c <= 0x7E) ||  // ASCII printable
-                (c >= 0xC2 && c <= 0xF4)) {   // Valid UTF-8 lead bytes
+        for (unsigned char c : input)
+        {
+            if ((c >= 0x20 && c <= 0x7E) || // ASCII printable
+                (c >= 0xC2 && c <= 0xF4))
+            { // Valid UTF-8 lead bytes
                 output += c;
-            } else {
+            }
+            else
+            {
                 output += ' '; // Replace invalid chars with space
             }
         }
-        
+
         // Trim leading and trailing whitespace
         auto start = output.find_first_not_of(" \t\r\n");
         auto end = output.find_last_not_of(" \t\r\n");
-        
-        if (start == std::string::npos) return "N/A";
+
+        if (start == std::string::npos)
+            return "N/A";
         return output.substr(start, end - start + 1);
     }
 
     // Convert WMI VARIANT to safe string, handling null cases
-    std::string safeWMIString(const VARIANT& vtProp) {
-        if (vtProp.vt == VT_NULL || vtProp.vt == VT_EMPTY) {
+    std::string safeWMIString(const VARIANT &vtProp)
+    {
+        if (vtProp.vt == VT_NULL || vtProp.vt == VT_EMPTY)
+        {
             return "N/A";
         }
-        try {
+        try
+        {
             return sanitizeString(std::string(_bstr_t(vtProp.bstrVal)));
-        } catch (...) {
+        }
+        catch (...)
+        {
             return "N/A";
         }
     }
 
     // Thread-safe logging function for system information operations
-    void systemLog(const char* level, const std::string& message) {
+    void systemLog(const char *level, const std::string &message)
+    {
         std::lock_guard<std::mutex> lock(g_logMutex);
-        if (g_logCallback) {
+        if (g_logCallback)
+        {
             g_logCallback(level, message.c_str());
         }
     }
 
     // Format string with different types of values
-    std::string formatString(const std::string& base, const std::string& value) {
+    std::string formatString(const std::string &base, const std::string &value)
+    {
         return base + value;
     }
 
-    std::string formatString(const std::string& base, int64_t value) {
+    std::string formatString(const std::string &base, int64_t value)
+    {
         return base + std::to_string(value);
     }
 
-    std::string formatString(const std::string& base, size_t value) {
+    std::string formatString(const std::string &base, size_t value)
+    {
         return base + std::to_string(value);
     }
 
     // Format value with unit (e.g., "500 MB", "2.5 GB")
-    std::string formatWithUnit(const std::string& base, int64_t value, const std::string& unit) {
+    std::string formatWithUnit(const std::string &base, int64_t value, const std::string &unit)
+    {
         return formatString(base, value) + unit;
     }
 
-    std::string formatWithUnit(const std::string& base, size_t value, const std::string& unit) {
+    std::string formatWithUnit(const std::string &base, size_t value, const std::string &unit)
+    {
         return formatString(base, value) + unit;
+    }
+
+    // Helper to get bit depth from EDID
+    int getEDIDBitDepth(unsigned char *edid)
+    {
+        // Get from byte 24 of EDID
+        unsigned char features = edid[24];
+        if (features & 0x80)
+            return 10; // If bit 7 is set
+        if (features & 0x40)
+            return 8; // If bit 6 is set
+        return 6;     // Default
+    }
+
+    // Helper to get color space from EDID
+    std::string getEDIDColorSpace(unsigned char *edid)
+    {
+        // Get from byte 24 of EDID
+        unsigned char features = edid[24];
+        if (features & 0x04)
+            return "Standard Dynamic Range (SDR)";
+        return "Standard Dynamic Range (SDR)"; // Default
+    }
+
+    // Helper to get manufacture date from EDID
+    std::string getEDIDManufactureDate(unsigned char *edid)
+    {
+        int week = edid[16];
+        int year = edid[17] + 1990;
+        char date[32];
+        snprintf(date, sizeof(date), "Week %d, %d", week, year);
+        return std::string(date);
+    }
+
+    // Helper to calculate pixel density
+    double calculatePPI(int width, int height, double diagonal_inch)
+    {
+        if (diagonal_inch <= 0)
+            return 0;
+        return std::sqrt(width * width + height * height) / diagonal_inch;
+    }
+
+    typedef std::map<std::wstring, std::pair<int, int>> PhyMonitorSizes;
+
+    // Helper function to get monitor sizes from EDID
+    PhyMonitorSizes findMonitorSizesFromEDID()
+    {
+        PhyMonitorSizes screenSizes;
+
+        const GUID GUID_DEVINTERFACE_MONITOR = {0xe6f07b5f, 0xee97, 0x4a90, 0xb0, 0x76, 0x33, 0xf5, 0x7b, 0xf4, 0xea, 0xa7};
+        const HDEVINFO hDevInfo = SetupDiGetClassDevs(&GUID_DEVINTERFACE_MONITOR, NULL, NULL, DIGCF_DEVICEINTERFACE);
+
+        wchar_t devPathBuffer[sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W) + (128 * sizeof(wchar_t))];
+
+        DWORD monitorIndex = 0;
+        SP_DEVICE_INTERFACE_DATA devInfo;
+        devInfo.cbSize = sizeof(devInfo);
+
+        while (SetupDiEnumDeviceInterfaces(hDevInfo, NULL, &GUID_DEVINTERFACE_MONITOR, monitorIndex, &devInfo))
+        {
+            ++monitorIndex;
+
+            SP_DEVICE_INTERFACE_DETAIL_DATA_W *devPathData = (SP_DEVICE_INTERFACE_DETAIL_DATA_W *)devPathBuffer;
+            devPathData->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+            SP_DEVINFO_DATA devInfoData;
+            memset(&devInfoData, 0, sizeof(devInfoData));
+            devInfoData.cbSize = sizeof(devInfoData);
+
+            if (!SetupDiGetDeviceInterfaceDetailW(hDevInfo, &devInfo, devPathData, sizeof(devPathBuffer), NULL, &devInfoData))
+                continue;
+
+            const std::wstring deviceId = devPathData->DevicePath;
+
+            wchar_t instanceId[MAX_DEVICE_ID_LEN];
+            if (!SetupDiGetDeviceInstanceIdW(hDevInfo, &devInfoData, instanceId, MAX_PATH, NULL))
+                continue;
+
+            HKEY hEDIDRegKey = SetupDiOpenDevRegKey(hDevInfo, &devInfoData, DICS_FLAG_GLOBAL, 0, DIREG_DEV, KEY_READ);
+            if (!hEDIDRegKey || (hEDIDRegKey == INVALID_HANDLE_VALUE))
+                continue;
+
+            BYTE dataEDID[1024];
+            DWORD sizeOfDataEDID = sizeof(dataEDID);
+            if (ERROR_SUCCESS == RegQueryValueExW(hEDIDRegKey, L"EDID", NULL, NULL, dataEDID, &sizeOfDataEDID))
+            {
+                int widthMm = ((dataEDID[68] & 0xF0) << 4) + dataEDID[66];
+                int heightMm = ((dataEDID[68] & 0x0F) << 8) + dataEDID[67];
+                screenSizes[deviceId] = std::make_pair(widthMm, heightMm);
+            }
+
+            RegCloseKey(hEDIDRegKey);
+        }
+
+        SetupDiDestroyDeviceInfoList(hDevInfo);
+        return screenSizes;
+    }
+
+    // Helper function to get physical size of monitor
+    std::pair<int, int> getMonitorSizeInMillimeter(HMONITOR hMonitor)
+    {
+        const PhyMonitorSizes &sizesById = findMonitorSizesFromEDID();
+
+        MONITORINFOEXW monInfo;
+        monInfo.cbSize = sizeof(monInfo);
+        if (!GetMonitorInfoW(hMonitor, &monInfo))
+            return std::make_pair(0, 0);
+
+        // Get physical size from EDID data
+        for (const auto &[deviceId, size] : sizesById)
+        {
+            if (size.first > 0 && size.second > 0)
+            {
+                return size;
+            }
+        }
+
+        return std::make_pair(0, 0);
     }
 }
 
@@ -88,17 +241,21 @@ std::atomic<bool> SystemInfoCollector::running{true};
 std::thread SystemInfoCollector::updateThread;
 
 // Persistent WMI Connection management class
-class WMIConnection {
-    static IWbemServices* pSvc;
+class WMIConnection
+{
+    static IWbemServices *pSvc;
     static bool initialized;
     static std::mutex initMutex;
 
 public:
     // Get WMI service instance with lazy initialization
-    static IWbemServices* getService() {
-        if (!initialized) {
+    static IWbemServices *getService()
+    {
+        if (!initialized)
+        {
             std::lock_guard<std::mutex> lock(initMutex);
-            if (!initialized) {
+            if (!initialized)
+            {
                 initialize();
             }
         }
@@ -107,31 +264,36 @@ public:
 
 private:
     // Initialize WMI service connection
-    static void initialize() {
-        if (SUCCEEDED(WMIHelper::initialize(nullptr, &pSvc))) {
+    static void initialize()
+    {
+        if (SUCCEEDED(WMIHelper::initialize(nullptr, &pSvc)))
+        {
             initialized = true;
         }
     }
 };
 
 // Initialize static members of WMIConnection
-IWbemServices* WMIConnection::pSvc = nullptr;
+IWbemServices *WMIConnection::pSvc = nullptr;
 bool WMIConnection::initialized = false;
 std::mutex WMIConnection::initMutex;
 
 // Update frequently changing system information
-void SystemInfoCollector::updateFastData() {
+void SystemInfoCollector::updateFastData()
+{
     cachedDynamicInfo["storage"] = getStorageInfo();
     cachedDynamicInfo["battery"] = getBatteryInfo();
     cachedDynamicInfo["network"] = getNetworkInfo();
 }
 
 // Update system information that changes less frequently
-void SystemInfoCollector::updateSlowData() {
+void SystemInfoCollector::updateSlowData()
+{
     static auto lastSlowUpdate = std::chrono::steady_clock::now();
     auto now = std::chrono::steady_clock::now();
-    
-    if (std::chrono::duration_cast<std::chrono::seconds>(now - lastSlowUpdate).count() >= 1) {
+
+    if (std::chrono::duration_cast<std::chrono::seconds>(now - lastSlowUpdate).count() >= 1)
+    {
         cachedDynamicInfo["cpu"] = getCPUInfo();
         cachedDynamicInfo["memory"] = getMemoryInfo();
         lastSlowUpdate = now;
@@ -139,63 +301,72 @@ void SystemInfoCollector::updateSlowData() {
 }
 
 // Background thread for updating dynamic system information
-void SystemInfoCollector::updateDynamicDataThread() {
+void SystemInfoCollector::updateDynamicDataThread()
+{
     systemLog("INFO", std::string("Dynamic update thread started"));
-    while (running) {
-        try {
+    while (running)
+    {
+        try
+        {
             {
                 std::lock_guard<std::mutex> lock(cacheMutex);
                 systemLog("INFO", std::string("=== Updating Dynamic Data ==="));
-                
+
                 // Update and time fast-changing data
                 auto start = std::chrono::steady_clock::now();
                 updateFastData();
                 auto fastTime = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() - start).count();
+                                    std::chrono::steady_clock::now() - start)
+                                    .count();
                 systemLog("INFO", formatWithUnit("Fast data updated in ", fastTime, "ms"));
-                
+
                 // Update and time slower-changing data
                 start = std::chrono::steady_clock::now();
                 updateSlowData();
                 auto slowTime = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() - start).count();
+                                    std::chrono::steady_clock::now() - start)
+                                    .count();
                 systemLog("INFO", formatWithUnit("Slow data updated in ", slowTime, "ms"));
 
                 // Log cache statistics
                 systemLog("INFO", std::string("Cache sizes:"));
                 systemLog("INFO", formatWithUnit("- Dynamic: ", cachedDynamicInfo.dump().length(), " bytes"));
                 systemLog("INFO", formatWithUnit("- Static: ", cachedStaticInfo.dump().length(), " bytes"));
-                
+
                 // Verify data completeness
                 systemLog("INFO", std::string("\nVerifying cached data:"));
-                systemLog("INFO", std::string("- Storage: ") + 
-                    (cachedDynamicInfo.contains("storage") ? "Present" : "Missing"));
-                systemLog("INFO", std::string("- Battery: ") + 
-                    (cachedDynamicInfo.contains("battery") ? "Present" : "Missing"));
-                systemLog("INFO", std::string("- Network: ") + 
-                    (cachedDynamicInfo.contains("network") ? "Present" : "Missing"));
-                systemLog("INFO", std::string("- CPU: ") + 
-                    (cachedDynamicInfo.contains("cpu") ? "Present" : "Missing"));
-                systemLog("INFO", std::string("- Memory: ") + 
-                    (cachedDynamicInfo.contains("memory") ? "Present" : "Missing"));
+                systemLog("INFO", std::string("- Storage: ") +
+                                      (cachedDynamicInfo.contains("storage") ? "Present" : "Missing"));
+                systemLog("INFO", std::string("- Battery: ") +
+                                      (cachedDynamicInfo.contains("battery") ? "Present" : "Missing"));
+                systemLog("INFO", std::string("- Network: ") +
+                                      (cachedDynamicInfo.contains("network") ? "Present" : "Missing"));
+                systemLog("INFO", std::string("- CPU: ") +
+                                      (cachedDynamicInfo.contains("cpu") ? "Present" : "Missing"));
+                systemLog("INFO", std::string("- Memory: ") +
+                                      (cachedDynamicInfo.contains("memory") ? "Present" : "Missing"));
                 systemLog("INFO", std::string("=========================="));
             }
         }
-        catch (const std::exception& e) {
+        catch (const std::exception &e)
+        {
             systemLog("ERROR", std::string("Error in update thread: ") + e.what());
         }
-        catch (...) {
+        catch (...)
+        {
             systemLog("ERROR", std::string("Unknown error in update thread"));
         }
-        
+
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     systemLog("INFO", std::string("Dynamic update thread stopped"));
 }
 
 // Initialize system information cache and start update thread
-void SystemInfoCollector::initializeCache() {
-    try {
+void SystemInfoCollector::initializeCache()
+{
+    try
+    {
         std::lock_guard<std::mutex> lock(cacheMutex);
         systemLog("INFO", std::string("\n=== Initializing Cache ==="));
 
@@ -206,6 +377,7 @@ void SystemInfoCollector::initializeCache() {
         cachedStaticInfo["motherboard"] = getMotherboardInfo();
         cachedStaticInfo["gpu"] = getGPUInfo();
         cachedStaticInfo["audio"] = getAudioInfo();
+        cachedStaticInfo["monitors"] = getMonitorInfo();
         lastStaticUpdate = std::chrono::steady_clock::now();
 
         // Initialize dynamic system information
@@ -220,39 +392,46 @@ void SystemInfoCollector::initializeCache() {
         updateThread = std::thread(updateDynamicDataThread);
         systemLog("INFO", std::string("=========================="));
     }
-    catch (const std::exception& e) {
+    catch (const std::exception &e)
+    {
         systemLog("ERROR", std::string("Error in initializeCache: ") + e.what());
         throw;
     }
 }
 
 // Clean up resources and stop update thread
-void SystemInfoCollector::cleanup() {
-    try {
+void SystemInfoCollector::cleanup()
+{
+    try
+    {
         systemLog("INFO", std::string("\n=== Cleaning Up ==="));
         running = false;
         systemLog("INFO", std::string("Stopping update thread..."));
-        if (updateThread.joinable()) {
+        if (updateThread.joinable())
+        {
             updateThread.join();
         }
         systemLog("INFO", std::string("Update thread stopped"));
         systemLog("INFO", std::string("Cleanup complete"));
         systemLog("INFO", std::string("================="));
     }
-    catch (const std::exception& e) {
+    catch (const std::exception &e)
+    {
         systemLog("ERROR", std::string("Error in cleanup: ") + e.what());
     }
 }
 
 // Get complete system information, updating cache if needed
-json SystemInfoCollector::getSystemInfo() {
+json SystemInfoCollector::getSystemInfo()
+{
     json info;
-    
-    try {
+
+    try
+    {
         std::lock_guard<std::mutex> lock(cacheMutex);
-        
+
         systemLog("INFO", std::string("\n=== Getting System Info ==="));
-        
+
         // Update static data if cache expired
         auto now = std::chrono::steady_clock::now();
         if (cachedStaticInfo.empty() ||
@@ -266,6 +445,7 @@ json SystemInfoCollector::getSystemInfo() {
             cachedStaticInfo["motherboard"] = getMotherboardInfo();
             cachedStaticInfo["gpu"] = getGPUInfo();
             cachedStaticInfo["audio"] = getAudioInfo();
+            cachedStaticInfo["monitors"] = getMonitorInfo();
             lastStaticUpdate = now;
         }
 
@@ -273,18 +453,20 @@ json SystemInfoCollector::getSystemInfo() {
         systemLog("INFO", std::string("Merging data..."));
         info.merge_patch(cachedDynamicInfo);
         info.merge_patch(cachedStaticInfo);
-        
+
         // Log data verification
         systemLog("INFO", std::string("\nVerifying final data:"));
         systemLog("INFO", std::string("- Static fields: ") + std::to_string(info.size()));
-        systemLog("INFO", std::string("- Dynamic fields present: ") 
-                  + std::to_string(info.contains("cpu") && info.contains("memory") && 
-                      info.contains("storage") && info.contains("battery") && 
-                      info.contains("network")));
+        systemLog("INFO", std::string("- Dynamic fields present: ") + std::to_string(info.contains("cpu") && info.contains("memory") &&
+                                                                                     info.contains("storage") && info.contains("battery") &&
+                                                                                     info.contains("network")));
+        systemLog("INFO", std::string("- Monitor info present: ") +
+                              (info.contains("monitors") ? "Yes" : "No"));
         systemLog("INFO", std::string("Total data size: ") + std::to_string(info.dump().length()) + " bytes");
         systemLog("INFO", std::string("=========================="));
     }
-    catch (const std::exception& e) {
+    catch (const std::exception &e)
+    {
         systemLog("ERROR", std::string("Error in getSystemInfo: ") + e.what());
         throw;
     }
@@ -293,27 +475,33 @@ json SystemInfoCollector::getSystemInfo() {
 }
 
 // Generate unique device ID based on hardware information
-std::string SystemInfoCollector::getDeviceId() {
-    try {
+std::string SystemInfoCollector::getDeviceId()
+{
+    try
+    {
         std::string baseInfo;
 
         // Query motherboard serial number through WMI
         WMISession wmiSession;
         IWbemServices *pSvc = wmiSession.getServices();
-        if (pSvc) {
+        if (pSvc)
+        {
             IEnumWbemClassObject *pEnumerator = NULL;
             if (SUCCEEDED(pSvc->ExecQuery(
                     bstr_t("WQL"),
                     bstr_t("SELECT * FROM Win32_BaseBoard"),
                     WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
                     NULL,
-                    &pEnumerator))) {
+                    &pEnumerator)))
+            {
 
                 IWbemClassObject *pclsObj = NULL;
                 ULONG uReturn = 0;
-                if (SUCCEEDED(pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn)) && uReturn != 0) {
+                if (SUCCEEDED(pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn)) && uReturn != 0)
+                {
                     VARIANT vtProp;
-                    if (SUCCEEDED(pclsObj->Get(L"SerialNumber", 0, &vtProp, 0, 0))) {
+                    if (SUCCEEDED(pclsObj->Get(L"SerialNumber", 0, &vtProp, 0, 0)))
+                    {
                         baseInfo += _bstr_t(vtProp.bstrVal);
                         VariantClear(&vtProp);
                     }
@@ -326,7 +514,8 @@ std::string SystemInfoCollector::getDeviceId() {
         // Add computer name to base info
         char computerName[MAX_COMPUTERNAME_LENGTH + 1];
         DWORD size = sizeof(computerName);
-        if (GetComputerNameA(computerName, &size)) {
+        if (GetComputerNameA(computerName, &size))
+        {
             baseInfo += computerName;
         }
 
@@ -348,7 +537,8 @@ std::string SystemInfoCollector::getDeviceId() {
 
         return ss.str();
     }
-    catch (const std::exception &e) {
+    catch (const std::exception &e)
+    {
         logError("getDeviceId", e);
         // Fallback to computer name if UUID generation fails
         char computerName[MAX_COMPUTERNAME_LENGTH + 1];
@@ -359,36 +549,41 @@ std::string SystemInfoCollector::getDeviceId() {
 }
 
 // Get system's computer name
-std::string SystemInfoCollector::getDeviceName() {
+std::string SystemInfoCollector::getDeviceName()
+{
     char computerName[MAX_COMPUTERNAME_LENGTH + 1];
     DWORD size = sizeof(computerName);
-    if (GetComputerNameA(computerName, &size)) {
+    if (GetComputerNameA(computerName, &size))
+    {
         return sanitizeString(std::string(computerName));
     }
     return "Unknown";
 }
 
 // Log error with component and exception details
-void SystemInfoCollector::logError(const char* function, const std::exception& e) {
+void SystemInfoCollector::logError(const char *function, const std::exception &e)
+{
     Logger::error("SystemInfo", std::string(function) + ": " + e.what());
 }
 
 // Collect motherboard and BIOS information through WMI
-json SystemInfoCollector::getMotherboardInfo() {
+json SystemInfoCollector::getMotherboardInfo()
+{
     // Initialize default values
     json board_info = {
         {"product_name", "N/A"},
         {"manufacturer", "N/A"},
         {"bios_version", "N/A"},
         {"bios_serial", "N/A"},
-        {"board_serial", "N/A"}
-    };
+        {"board_serial", "N/A"}};
 
-    try {
+    try
+    {
         WMISession wmiSession;
         IWbemServices *pSvc = wmiSession.getServices();
         HRESULT hr;
-        if (!pSvc) return board_info;
+        if (!pSvc)
+            return board_info;
 
         // Query baseboard (motherboard) information
         IEnumWbemClassObject *pEnumerator = NULL;
@@ -399,27 +594,32 @@ json SystemInfoCollector::getMotherboardInfo() {
             NULL,
             &pEnumerator);
 
-        if (SUCCEEDED(hr)) {
+        if (SUCCEEDED(hr))
+        {
             IWbemClassObject *pclsObj = NULL;
             ULONG uReturn = 0;
 
-            if (SUCCEEDED(pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn)) && uReturn != 0) {
+            if (SUCCEEDED(pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn)) && uReturn != 0)
+            {
                 VARIANT vtProp;
 
                 // Get motherboard product name
-                if (SUCCEEDED(pclsObj->Get(L"Product", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                if (SUCCEEDED(pclsObj->Get(L"Product", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                {
                     board_info["product_name"] = safeWMIString(vtProp);
                 }
                 VariantClear(&vtProp);
 
                 // Get motherboard manufacturer
-                if (SUCCEEDED(pclsObj->Get(L"Manufacturer", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                if (SUCCEEDED(pclsObj->Get(L"Manufacturer", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                {
                     board_info["manufacturer"] = safeWMIString(vtProp);
                 }
                 VariantClear(&vtProp);
 
                 // Get motherboard serial number
-                if (SUCCEEDED(pclsObj->Get(L"SerialNumber", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                if (SUCCEEDED(pclsObj->Get(L"SerialNumber", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                {
                     board_info["board_serial"] = safeWMIString(vtProp);
                 }
                 VariantClear(&vtProp);
@@ -437,21 +637,25 @@ json SystemInfoCollector::getMotherboardInfo() {
             NULL,
             &pEnumerator);
 
-        if (SUCCEEDED(hr)) {
+        if (SUCCEEDED(hr))
+        {
             IWbemClassObject *pclsObj = NULL;
             ULONG uReturn = 0;
 
-            if (SUCCEEDED(pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn)) && uReturn != 0) {
+            if (SUCCEEDED(pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn)) && uReturn != 0)
+            {
                 VARIANT vtProp;
 
                 // Get BIOS version
-                if (SUCCEEDED(pclsObj->Get(L"SMBIOSBIOSVersion", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                if (SUCCEEDED(pclsObj->Get(L"SMBIOSBIOSVersion", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                {
                     board_info["bios_version"] = safeWMIString(vtProp);
                 }
                 VariantClear(&vtProp);
 
                 // Get BIOS serial number
-                if (SUCCEEDED(pclsObj->Get(L"SerialNumber", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                if (SUCCEEDED(pclsObj->Get(L"SerialNumber", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                {
                     board_info["bios_serial"] = safeWMIString(vtProp);
                 }
                 VariantClear(&vtProp);
@@ -461,7 +665,8 @@ json SystemInfoCollector::getMotherboardInfo() {
             pEnumerator->Release();
         }
     }
-    catch (const std::exception &e) {
+    catch (const std::exception &e)
+    {
         logError("getMotherboardInfo", e);
     }
 
@@ -469,9 +674,11 @@ json SystemInfoCollector::getMotherboardInfo() {
 }
 
 // Collect CPU information including usage statistics
-json SystemInfoCollector::getCPUInfo() {
+json SystemInfoCollector::getCPUInfo()
+{
     json cpu_array = json::array();
-    try {
+    try
+    {
         WMISession wmiSession;
         IWbemServices *pSvc = wmiSession.getServices();
         HRESULT hr;
@@ -487,40 +694,52 @@ json SystemInfoCollector::getCPUInfo() {
             NULL,
             &pEnumerator);
 
-        if (SUCCEEDED(hr)) {
+        if (SUCCEEDED(hr))
+        {
             IWbemClassObject *pclsObj = NULL;
             ULONG uReturn = 0;
 
-            while (SUCCEEDED(pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn)) && uReturn != 0) {
+            while (SUCCEEDED(pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn)) && uReturn != 0)
+            {
                 json cpu_info;
                 VARIANT vtProp;
 
                 // Get processor name/model
-                if (SUCCEEDED(pclsObj->Get(L"Name", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                if (SUCCEEDED(pclsObj->Get(L"Name", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                {
                     cpu_info["name"] = safeWMIString(vtProp);
                 }
                 VariantClear(&vtProp);
 
                 // Get number of physical cores
-                if (SUCCEEDED(pclsObj->Get(L"NumberOfCores", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                if (SUCCEEDED(pclsObj->Get(L"NumberOfCores", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                {
                     cpu_info["cores"] = vtProp.uintVal;
-                } else {
+                }
+                else
+                {
                     cpu_info["cores"] = 0;
                 }
                 VariantClear(&vtProp);
 
                 // Get number of logical processors (threads)
-                if (SUCCEEDED(pclsObj->Get(L"NumberOfLogicalProcessors", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                if (SUCCEEDED(pclsObj->Get(L"NumberOfLogicalProcessors", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                {
                     cpu_info["threads"] = vtProp.uintVal;
-                } else {
+                }
+                else
+                {
                     cpu_info["threads"] = 0;
                 }
                 VariantClear(&vtProp);
 
                 // Get maximum clock speed
-                if (SUCCEEDED(pclsObj->Get(L"MaxClockSpeed", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                if (SUCCEEDED(pclsObj->Get(L"MaxClockSpeed", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                {
                     cpu_info["clock_speed"] = std::to_string(vtProp.uintVal) + " MHz";
-                } else {
+                }
+                else
+                {
                     cpu_info["clock_speed"] = "0 MHz";
                 }
                 VariantClear(&vtProp);
@@ -531,13 +750,13 @@ json SystemInfoCollector::getCPUInfo() {
                 PdhOpenQuery(NULL, NULL, &cpuQuery);
                 PdhAddEnglishCounterA(cpuQuery, "\\Processor(_Total)\\% Processor Time", NULL, &cpuTotal);
                 PdhCollectQueryData(cpuQuery);
-                Sleep(100);  // Wait for next sample
+                Sleep(100); // Wait for next sample
                 PdhCollectQueryData(cpuQuery);
                 PDH_FMT_COUNTERVALUE counterVal;
                 PdhGetFormattedCounterValue(cpuTotal, PDH_FMT_DOUBLE, NULL, &counterVal);
                 std::stringstream ss;
                 ss << std::fixed << std::setprecision(2) << counterVal.doubleValue;
-                cpu_info["usage"] = std::stod(ss.str());  // Store as double with 2 decimal places
+                cpu_info["usage"] = std::stod(ss.str()); // Store as double with 2 decimal places
                 PdhCloseQuery(cpuQuery);
 
                 cpu_array.push_back(cpu_info);
@@ -546,16 +765,19 @@ json SystemInfoCollector::getCPUInfo() {
             pEnumerator->Release();
         }
     }
-    catch (const std::exception &e) {
+    catch (const std::exception &e)
+    {
         logError("getCPUInfo", e);
     }
     return cpu_array;
 }
 
 // Collect GPU information including VRAM details
-json SystemInfoCollector::getGPUInfo() {
+json SystemInfoCollector::getGPUInfo()
+{
     json gpu_array = json::array();
-    try {
+    try
+    {
         WMISession wmiSession;
         IWbemServices *pSvc = wmiSession.getServices();
         HRESULT hr;
@@ -571,28 +793,36 @@ json SystemInfoCollector::getGPUInfo() {
             NULL,
             &pEnumerator);
 
-        if (SUCCEEDED(hr)) {
+        if (SUCCEEDED(hr))
+        {
             IWbemClassObject *pclsObj = NULL;
             ULONG uReturn = 0;
 
-            while (SUCCEEDED(pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn)) && uReturn != 0) {
+            while (SUCCEEDED(pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn)) && uReturn != 0)
+            {
                 json gpu_info;
                 VARIANT vtProp;
 
                 // Get GPU name/model
                 std::wstring gpuName;
-                if (SUCCEEDED(pclsObj->Get(L"Name", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                if (SUCCEEDED(pclsObj->Get(L"Name", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                {
                     gpuName = vtProp.bstrVal;
                     gpu_info["name"] = safeWMIString(vtProp);
-                } else {
+                }
+                else
+                {
                     gpu_info["name"] = "N/A";
                 }
                 VariantClear(&vtProp);
 
                 // Get GPU driver version
-                if (SUCCEEDED(pclsObj->Get(L"DriverVersion", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                if (SUCCEEDED(pclsObj->Get(L"DriverVersion", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                {
                     gpu_info["driver_version"] = safeWMIString(vtProp);
-                } else {
+                }
+                else
+                {
                     gpu_info["driver_version"] = "N/A";
                 }
                 VariantClear(&vtProp);
@@ -600,12 +830,15 @@ json SystemInfoCollector::getGPUInfo() {
                 // Get VRAM information using DXGI
                 gpu_info["vram_total"] = "N/A";
                 IDXGIFactory *pFactory = nullptr;
-                if (SUCCEEDED(CreateDXGIFactory(__uuidof(IDXGIFactory), (void **)&pFactory))) {
+                if (SUCCEEDED(CreateDXGIFactory(__uuidof(IDXGIFactory), (void **)&pFactory)))
+                {
                     IDXGIAdapter *pAdapter = nullptr;
                     // Enumerate through all DXGI adapters
-                    for (UINT i = 0; pFactory->EnumAdapters(i, &pAdapter) != DXGI_ERROR_NOT_FOUND; ++i) {
+                    for (UINT i = 0; pFactory->EnumAdapters(i, &pAdapter) != DXGI_ERROR_NOT_FOUND; ++i)
+                    {
                         DXGI_ADAPTER_DESC adapterDesc;
-                        if (SUCCEEDED(pAdapter->GetDesc(&adapterDesc))) {
+                        if (SUCCEEDED(pAdapter->GetDesc(&adapterDesc)))
+                        {
                             std::wstring descStr = adapterDesc.Description;
 
                             // Case insensitive comparison of GPU names
@@ -616,7 +849,8 @@ json SystemInfoCollector::getGPUInfo() {
 
                             // Match GPU name to get correct VRAM
                             if (lowerDesc.find(lowerName) != std::wstring::npos ||
-                                lowerName.find(lowerDesc) != std::wstring::npos) {
+                                lowerName.find(lowerDesc) != std::wstring::npos)
+                            {
                                 // Convert VRAM to GB with 2 decimal precision
                                 double vramGB = static_cast<double>(adapterDesc.DedicatedVideoMemory) /
                                                 (1024.0 * 1024.0 * 1024.0);
@@ -637,16 +871,19 @@ json SystemInfoCollector::getGPUInfo() {
             pEnumerator->Release();
         }
     }
-    catch (const std::exception &e) {
+    catch (const std::exception &e)
+    {
         logError("getGPUInfo", e);
     }
     return gpu_array;
 }
 
 // Collect memory information including RAM usage and details
-json SystemInfoCollector::getMemoryInfo() {
+json SystemInfoCollector::getMemoryInfo()
+{
     json memory_info;
-    try {
+    try
+    {
         // Get system memory status
         MEMORYSTATUSEX memInfo;
         memInfo.dwLength = sizeof(MEMORYSTATUSEX);
@@ -677,16 +914,19 @@ json SystemInfoCollector::getMemoryInfo() {
             NULL,
             &pEnumerator);
 
-        if (SUCCEEDED(hr)) {
+        if (SUCCEEDED(hr))
+        {
             IWbemClassObject *pclsObj = NULL;
             ULONG uReturn = 0;
 
-            while (SUCCEEDED(pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn)) && uReturn != 0) {
+            while (SUCCEEDED(pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn)) && uReturn != 0)
+            {
                 json slot_info;
                 VARIANT vtProp;
 
                 // Get RAM module capacity
-                if (SUCCEEDED(pclsObj->Get(L"Capacity", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                if (SUCCEEDED(pclsObj->Get(L"Capacity", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                {
                     UINT64 capacity = _wtoi64(vtProp.bstrVal);
                     double capacityGB = static_cast<double>(capacity) / (1024.0 * 1024.0 * 1024.0);
                     total_capacity += capacityGB;
@@ -695,25 +935,34 @@ json SystemInfoCollector::getMemoryInfo() {
                 VariantClear(&vtProp);
 
                 // Get RAM module speed
-                if (SUCCEEDED(pclsObj->Get(L"Speed", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                if (SUCCEEDED(pclsObj->Get(L"Speed", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                {
                     slot_info["speed"] = std::to_string(vtProp.uintVal);
-                } else {
+                }
+                else
+                {
                     slot_info["speed"] = "N/A MHz";
                 }
                 VariantClear(&vtProp);
 
                 // Get RAM slot location
-                if (SUCCEEDED(pclsObj->Get(L"DeviceLocator", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                if (SUCCEEDED(pclsObj->Get(L"DeviceLocator", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                {
                     slot_info["slot"] = safeWMIString(vtProp);
-                } else {
+                }
+                else
+                {
                     slot_info["slot"] = "Unknown Slot";
                 }
                 VariantClear(&vtProp);
 
                 // Get RAM module manufacturer
-                if (SUCCEEDED(pclsObj->Get(L"Manufacturer", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                if (SUCCEEDED(pclsObj->Get(L"Manufacturer", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                {
                     slot_info["manufacturer"] = safeWMIString(vtProp);
-                } else {
+                }
+                else
+                {
                     slot_info["manufacturer"] = "N/A";
                 }
                 VariantClear(&vtProp);
@@ -728,17 +977,20 @@ json SystemInfoCollector::getMemoryInfo() {
         memory_info["slots"] = memory_slots;
         memory_info["total_capacity"] = std::to_string(static_cast<int>(total_capacity)) + " GB";
     }
-    catch (const std::exception &e) {
+    catch (const std::exception &e)
+    {
         logError("getMemoryInfo", e);
     }
     return memory_info;
 }
 
 // Collect storage information including disk drives and partitions
-json SystemInfoCollector::getStorageInfo() {
+json SystemInfoCollector::getStorageInfo()
+{
     json storage_array = json::array();
 
-    try {
+    try
+    {
         WMISession wmiSession;
         IWbemServices *pSvc = wmiSession.getServices();
         HRESULT hr;
@@ -757,41 +1009,47 @@ json SystemInfoCollector::getStorageInfo() {
             NULL,
             &pDiskEnum);
 
-        if (SUCCEEDED(hr)) {
+        if (SUCCEEDED(hr))
+        {
             IWbemClassObject *pDiskObj = NULL;
             ULONG uReturn = 0;
 
-            while (SUCCEEDED(pDiskEnum->Next(WBEM_INFINITE, 1, &pDiskObj, &uReturn)) && uReturn != 0) {
+            while (SUCCEEDED(pDiskEnum->Next(WBEM_INFINITE, 1, &pDiskObj, &uReturn)) && uReturn != 0)
+            {
                 VARIANT vtProp;
                 json disk_info;
 
                 // Get disk device identifier
                 std::wstring deviceID;
-                if (SUCCEEDED(pDiskObj->Get(L"DeviceID", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                if (SUCCEEDED(pDiskObj->Get(L"DeviceID", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                {
                     deviceID = vtProp.bstrVal;
                 }
                 VariantClear(&vtProp);
 
                 // Get disk model name
-                if (SUCCEEDED(pDiskObj->Get(L"Model", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                if (SUCCEEDED(pDiskObj->Get(L"Model", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                {
                     disk_info["model"] = safeWMIString(vtProp);
                 }
                 VariantClear(&vtProp);
 
                 // Get disk interface type (SATA, NVMe, etc.)
-                if (SUCCEEDED(pDiskObj->Get(L"InterfaceType", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                if (SUCCEEDED(pDiskObj->Get(L"InterfaceType", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                {
                     disk_info["interface"] = safeWMIString(vtProp);
                 }
                 VariantClear(&vtProp);
 
                 // Query associated partitions for each physical disk
-                if (SUCCEEDED(pDiskObj->Get(L"Name", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                if (SUCCEEDED(pDiskObj->Get(L"Name", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                {
                     std::wstring diskName = vtProp.bstrVal;
 
                     // Get partition information using WMI associations
                     IEnumWbemClassObject *pPartEnum = NULL;
                     std::wstring query = L"ASSOCIATORS OF {Win32_DiskDrive.DeviceID='" +
-                                       deviceID + L"'} WHERE AssocClass = Win32_DiskDriveToDiskPartition";
+                                         deviceID + L"'} WHERE AssocClass = Win32_DiskDriveToDiskPartition";
 
                     BSTR bstrQuery = SysAllocString(query.c_str());
                     HRESULT hr = pSvc->ExecQuery(
@@ -802,18 +1060,21 @@ json SystemInfoCollector::getStorageInfo() {
                         &pPartEnum);
                     SysFreeString(bstrQuery);
 
-                    if (SUCCEEDED(hr)) {
+                    if (SUCCEEDED(hr))
+                    {
                         IWbemClassObject *pPartObj = NULL;
                         ULONG uPartReturn = 0;
 
-                        while (SUCCEEDED(pPartEnum->Next(WBEM_INFINITE, 1, &pPartObj, &uPartReturn)) && uPartReturn != 0) {
+                        while (SUCCEEDED(pPartEnum->Next(WBEM_INFINITE, 1, &pPartObj, &uPartReturn)) && uPartReturn != 0)
+                        {
                             VARIANT vtPartProp;
-                            if (SUCCEEDED(pPartObj->Get(L"DeviceID", 0, &vtPartProp, 0, 0))) {
+                            if (SUCCEEDED(pPartObj->Get(L"DeviceID", 0, &vtPartProp, 0, 0)))
+                            {
                                 // Get logical disks for each partition
                                 IEnumWbemClassObject *pLogicalEnum = NULL;
                                 std::wstring partQuery = L"ASSOCIATORS OF {Win32_DiskPartition.DeviceID='" +
-                                                       std::wstring(vtPartProp.bstrVal) +
-                                                       L"'} WHERE AssocClass = Win32_LogicalDiskToPartition";
+                                                         std::wstring(vtPartProp.bstrVal) +
+                                                         L"'} WHERE AssocClass = Win32_LogicalDiskToPartition";
 
                                 BSTR bstrPartQuery = SysAllocString(partQuery.c_str());
                                 hr = pSvc->ExecQuery(
@@ -824,16 +1085,19 @@ json SystemInfoCollector::getStorageInfo() {
                                     &pLogicalEnum);
                                 SysFreeString(bstrPartQuery);
 
-                                if (SUCCEEDED(hr)) {
+                                if (SUCCEEDED(hr))
+                                {
                                     IWbemClassObject *pLogicalObj = NULL;
                                     ULONG uLogicalReturn = 0;
 
                                     // Process each logical disk
                                     while (SUCCEEDED(pLogicalEnum->Next(WBEM_INFINITE, 1, &pLogicalObj, &uLogicalReturn)) &&
-                                           uLogicalReturn != 0) {
+                                           uLogicalReturn != 0)
+                                    {
                                         VARIANT vtLogicalProp;
                                         // Map physical disk info to logical drive
-                                        if (SUCCEEDED(pLogicalObj->Get(L"DeviceID", 0, &vtLogicalProp, 0, 0))) {
+                                        if (SUCCEEDED(pLogicalObj->Get(L"DeviceID", 0, &vtLogicalProp, 0, 0)))
+                                        {
                                             std::wstring logicalDrive = vtLogicalProp.bstrVal;
                                             physicalDisks[logicalDrive] = disk_info;
                                         }
@@ -865,58 +1129,73 @@ json SystemInfoCollector::getStorageInfo() {
             NULL,
             &pEnumerator);
 
-        if (SUCCEEDED(hr)) {
+        if (SUCCEEDED(hr))
+        {
             IWbemClassObject *pclsObj = NULL;
             ULONG uReturn = 0;
 
             // Process each logical disk
-            while (SUCCEEDED(pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn)) && uReturn != 0) {
+            while (SUCCEEDED(pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn)) && uReturn != 0)
+            {
                 json disk_info;
                 VARIANT vtProp;
 
                 // Get drive letter
                 std::wstring driveId;
-                if (SUCCEEDED(pclsObj->Get(L"DeviceID", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                if (SUCCEEDED(pclsObj->Get(L"DeviceID", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                {
                     driveId = vtProp.bstrVal;
                     disk_info["drive"] = safeWMIString(vtProp);
                 }
                 VariantClear(&vtProp);
 
                 // Get drive type (local or removable)
-                if (SUCCEEDED(pclsObj->Get(L"DriveType", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                if (SUCCEEDED(pclsObj->Get(L"DriveType", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                {
                     disk_info["type"] = (vtProp.intVal == 3) ? "Local Disk" : "Removable Disk";
                 }
                 VariantClear(&vtProp);
 
                 // Get total size
-                if (SUCCEEDED(pclsObj->Get(L"Size", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                if (SUCCEEDED(pclsObj->Get(L"Size", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                {
                     double sizeGB = _wtof(vtProp.bstrVal) / (1024.0 * 1024.0 * 1024.0);
                     disk_info["size"] = round(sizeGB * 100) / 100.0;
                 }
                 VariantClear(&vtProp);
 
                 // Get free space
-                if (SUCCEEDED(pclsObj->Get(L"FreeSpace", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                if (SUCCEEDED(pclsObj->Get(L"FreeSpace", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                {
                     double freeGB = _wtof(vtProp.bstrVal) / (1024.0 * 1024.0 * 1024.0);
                     disk_info["free"] = round(freeGB * 100) / 100.0;
                 }
                 VariantClear(&vtProp);
 
                 // Add physical disk information for local disks
-                if (disk_info["type"] == "Local Disk") {
+                if (disk_info["type"] == "Local Disk")
+                {
                     auto physicalDiskInfo = physicalDisks.find(driveId);
-                    if (physicalDiskInfo != physicalDisks.end()) {
+                    if (physicalDiskInfo != physicalDisks.end())
+                    {
                         disk_info["model"] = physicalDiskInfo->second["model"];
                         disk_info["interface"] = physicalDiskInfo->second["interface"];
-                    } else {
+                    }
+                    else
+                    {
                         disk_info["model"] = "Unknown Disk";
                         disk_info["interface"] = "Unknown";
                     }
-                } else {
+                }
+                else
+                {
                     // Handle removable disks
-                    if (SUCCEEDED(pclsObj->Get(L"VolumeName", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                    if (SUCCEEDED(pclsObj->Get(L"VolumeName", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                    {
                         disk_info["model"] = safeWMIString(vtProp);
-                    } else {
+                    }
+                    else
+                    {
                         disk_info["model"] = "Removable Disk";
                     }
                     VariantClear(&vtProp);
@@ -929,14 +1208,16 @@ json SystemInfoCollector::getStorageInfo() {
             pEnumerator->Release();
         }
     }
-    catch (const std::exception &e) {
+    catch (const std::exception &e)
+    {
         logError("getStorageInfo", e);
     }
     return storage_array;
 }
 
 // Collect network adapter information including Ethernet and WiFi
-json SystemInfoCollector::getNetworkInfo() {
+json SystemInfoCollector::getNetworkInfo()
+{
     json result;
     json ethernet = json::array();
     json wlan = json::array();
@@ -948,31 +1229,37 @@ json SystemInfoCollector::getNetworkInfo() {
     ULONG ulOutBufLen = sizeof(IP_ADAPTER_INFO);
 
     pAdapterInfo = (IP_ADAPTER_INFO *)malloc(sizeof(IP_ADAPTER_INFO));
-    if (pAdapterInfo == NULL) {
+    if (pAdapterInfo == NULL)
+    {
         return result;
     }
 
     // Reallocate memory if buffer is too small
-    if (GetAdaptersInfo(pAdapterInfo, &ulOutBufLen) == ERROR_BUFFER_OVERFLOW) {
+    if (GetAdaptersInfo(pAdapterInfo, &ulOutBufLen) == ERROR_BUFFER_OVERFLOW)
+    {
         free(pAdapterInfo);
         pAdapterInfo = (IP_ADAPTER_INFO *)malloc(ulOutBufLen);
-        if (pAdapterInfo == NULL) {
+        if (pAdapterInfo == NULL)
+        {
             return result;
         }
     }
 
     // Get network adapter information
-    if ((dwRetVal = GetAdaptersInfo(pAdapterInfo, &ulOutBufLen)) == NO_ERROR) {
+    if ((dwRetVal = GetAdaptersInfo(pAdapterInfo, &ulOutBufLen)) == NO_ERROR)
+    {
         pAdapter = pAdapterInfo;
-        while (pAdapter) {
+        while (pAdapter)
+        {
             // Skip virtual and system adapters
             std::string description = pAdapter->Description;
             std::transform(description.begin(), description.end(), description.begin(), ::tolower);
-            
+
             if (description.find("virtual") != std::string::npos ||
                 description.find("pseudo") != std::string::npos ||
                 description.find("loopback") != std::string::npos ||
-                description.find("microsoft") != std::string::npos) {
+                description.find("microsoft") != std::string::npos)
+            {
                 pAdapter = pAdapter->Next;
                 continue;
             }
@@ -981,16 +1268,19 @@ json SystemInfoCollector::getNetworkInfo() {
             json adapter;
             adapter["name"] = sanitizeString(pAdapter->Description);
             adapter["mac_address"] = sanitizeString(pAdapter->AdapterName);
-            
+
             // Get IP address and connection status
             std::string ipAddress = pAdapter->IpAddressList.IpAddress.String;
             adapter["ip_address"] = (ipAddress != "0.0.0.0") ? ipAddress : "N/A";
             adapter["status"] = (ipAddress != "0.0.0.0") ? "Connected" : "Not Connected";
 
             // Categorize adapter as Ethernet or WiFi
-            if (pAdapter->Type == MIB_IF_TYPE_ETHERNET) {
+            if (pAdapter->Type == MIB_IF_TYPE_ETHERNET)
+            {
                 ethernet.push_back(adapter);
-            } else if (pAdapter->Type == IF_TYPE_IEEE80211) {
+            }
+            else if (pAdapter->Type == IF_TYPE_IEEE80211)
+            {
                 wlan.push_back(adapter);
             }
 
@@ -999,7 +1289,8 @@ json SystemInfoCollector::getNetworkInfo() {
     }
 
     // Free allocated memory
-    if (pAdapterInfo) {
+    if (pAdapterInfo)
+    {
         free(pAdapterInfo);
     }
 
@@ -1010,10 +1301,12 @@ json SystemInfoCollector::getNetworkInfo() {
 }
 
 // Collect audio device information from the system
-json SystemInfoCollector::getAudioInfo() {
+json SystemInfoCollector::getAudioInfo()
+{
     json audio_array = json::array();
 
-    try {
+    try
+    {
         WMISession wmiSession;
         IWbemServices *pSvc = wmiSession.getServices();
         HRESULT hr;
@@ -1029,26 +1322,34 @@ json SystemInfoCollector::getAudioInfo() {
             NULL,
             &pEnumerator);
 
-        if (SUCCEEDED(hr)) {
+        if (SUCCEEDED(hr))
+        {
             IWbemClassObject *pclsObj = NULL;
             ULONG uReturn = 0;
 
-            while (SUCCEEDED(pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn)) && uReturn != 0) {
+            while (SUCCEEDED(pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn)) && uReturn != 0)
+            {
                 json audio_info;
                 VARIANT vtProp;
 
                 // Get audio device name
-                if (SUCCEEDED(pclsObj->Get(L"Name", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                if (SUCCEEDED(pclsObj->Get(L"Name", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                {
                     audio_info["name"] = safeWMIString(vtProp);
-                } else {
+                }
+                else
+                {
                     audio_info["name"] = "Unknown Audio Device";
                 }
                 VariantClear(&vtProp);
 
                 // Get audio device manufacturer
-                if (SUCCEEDED(pclsObj->Get(L"Manufacturer", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
+                if (SUCCEEDED(pclsObj->Get(L"Manufacturer", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL)
+                {
                     audio_info["manufacturer"] = safeWMIString(vtProp);
-                } else {
+                }
+                else
+                {
                     audio_info["manufacturer"] = "N/A";
                 }
                 VariantClear(&vtProp);
@@ -1059,27 +1360,31 @@ json SystemInfoCollector::getAudioInfo() {
             pEnumerator->Release();
         }
     }
-    catch (const std::exception &e) {
+    catch (const std::exception &e)
+    {
         logError("getAudioInfo", e);
     }
     return audio_array;
 }
 
 // Collect battery information and power status
-json SystemInfoCollector::getBatteryInfo() {
+json SystemInfoCollector::getBatteryInfo()
+{
     // Initialize default values for desktop system
     json battery_info = {
         {"percent", 100},
         {"power_plugged", true},
-        {"is_desktop", true}
-    };
+        {"is_desktop", true}};
 
-    try {
+    try
+    {
         // Get system power status
         SYSTEM_POWER_STATUS powerStatus;
-        if (GetSystemPowerStatus(&powerStatus)) {
+        if (GetSystemPowerStatus(&powerStatus))
+        {
             // Get battery percentage if available
-            if (powerStatus.BatteryLifePercent != 255) {
+            if (powerStatus.BatteryLifePercent != 255)
+            {
                 battery_info["percent"] = static_cast<int>(powerStatus.BatteryLifePercent);
                 battery_info["is_desktop"] = false; // Has valid battery, so not a desktop
             }
@@ -1090,17 +1395,130 @@ json SystemInfoCollector::getBatteryInfo() {
             // Detect if system is a desktop based on battery flags
             if (powerStatus.BatteryFlag == 128 ||
                 powerStatus.BatteryFlag == 255 ||
-                (powerStatus.BatteryLifePercent == 255 && powerStatus.BatteryFlag == 1)) {
+                (powerStatus.BatteryLifePercent == 255 && powerStatus.BatteryFlag == 1))
+            {
                 battery_info["is_desktop"] = true;
                 battery_info["percent"] = 100;
                 battery_info["power_plugged"] = true;
             }
         }
     }
-    catch (const std::exception &e) {
+    catch (const std::exception &e)
+    {
         logError("getBatteryInfo", e);
     }
 
     return battery_info;
 }
-  
+
+// Collect monitor information including resolution, physical size, and other display characteristics
+json SystemInfoCollector::getMonitorInfo()
+{
+    json monitors = json::array();
+
+    try
+    {
+        systemLog("INFO", "Starting monitor information collection...");
+
+        // Callback function to process each monitor found in the system
+        auto MonitorEnumProc = [](HMONITOR hMonitor, HDC hdcMonitor, LPRECT lprcMonitor, LPARAM dwData) -> BOOL
+        {
+            std::vector<json> *monitorsInfo = reinterpret_cast<std::vector<json> *>(dwData);
+            json monitor;
+
+            // Get basic monitor information using Windows API
+            MONITORINFOEXA monitorInfo;
+            monitorInfo.cbSize = sizeof(MONITORINFOEXA);
+            if (GetMonitorInfoA(hMonitor, &monitorInfo))
+            {
+                // Get display resolution (width x height) and primary monitor status
+                monitor["width"] = monitorInfo.rcMonitor.right - monitorInfo.rcMonitor.left;
+                monitor["height"] = monitorInfo.rcMonitor.bottom - monitorInfo.rcMonitor.top;
+                monitor["primary"] = (monitorInfo.dwFlags & MONITORINFOF_PRIMARY) != 0;
+
+                // Get monitor device identification and manufacturer information
+                std::string deviceName = monitorInfo.szDevice;
+                DISPLAY_DEVICEA displayDevice = {0};
+                displayDevice.cb = sizeof(displayDevice);
+                if (EnumDisplayDevicesA(deviceName.c_str(), 0, &displayDevice, 0))
+                {
+                    // Store the unique device identifier
+                    monitor["device_id"] = std::string(displayDevice.DeviceID);
+
+                    // Extract manufacturer code from device ID (format: MONITOR\[MFG]\...)
+                    std::string deviceId = displayDevice.DeviceID;
+                    size_t start = deviceId.find("\\") + 1;
+                    size_t end = deviceId.find("\\", start);
+                    if (start != std::string::npos && end != std::string::npos)
+                    {
+                        std::string mfg = deviceId.substr(start, end - start);
+                        if (!mfg.empty() && mfg != "MONITOR")
+                        {
+                            monitor["manufacturer"] = mfg;
+                        }
+                    }
+                }
+
+                // Get current display mode settings (resolution, refresh rate)
+                DEVMODEA dm = {0};
+                dm.dmSize = sizeof(dm);
+                if (EnumDisplaySettingsA(deviceName.c_str(), ENUM_CURRENT_SETTINGS, &dm))
+                {
+                    // Calculate and store aspect ratio (e.g., 16:9)
+                    int gcd = std::gcd(dm.dmPelsWidth, dm.dmPelsHeight);
+                    monitor["aspect_ratio"] = std::to_string(dm.dmPelsWidth / gcd) + ":" +
+                                              std::to_string(dm.dmPelsHeight / gcd);
+
+                    // Store native (maximum) resolution
+                    monitor["native_resolution"] = std::to_string(dm.dmPelsWidth) + " x " +
+                                                   std::to_string(dm.dmPelsHeight);
+
+                    // Store refresh rate and current resolution with refresh rate
+                    monitor["refresh_rate"] = dm.dmDisplayFrequency;
+                    monitor["current_resolution"] = monitor["native_resolution"].get<std::string>() +
+                                                    " @ " + std::to_string(dm.dmDisplayFrequency) + " Hz";
+                }
+
+                // Get physical dimensions from EDID data
+                auto [widthMm, heightMm] = getMonitorSizeInMillimeter(hMonitor);
+                if (widthMm > 0 && heightMm > 0)
+                {
+                    // Store physical dimensions in millimeters
+                    monitor["physical_width_mm"] = widthMm;
+                    monitor["physical_height_mm"] = heightMm;
+
+                    // Calculate and store diagonal screen size in inches
+                    double diagonal_mm = std::sqrt(widthMm * widthMm + heightMm * heightMm);
+                    double diagonal_inch = diagonal_mm / 25.4; // Convert mm to inches
+                    char size_str[32];
+                    snprintf(size_str, sizeof(size_str), "%.1f inch", diagonal_inch);
+                    monitor["screen_size"] = size_str;
+                }
+            }
+
+            monitorsInfo->push_back(monitor);
+            return TRUE;
+        };
+
+        // Enumerate all active monitors in the system
+        std::vector<json> monitorsInfo;
+        EnumDisplayMonitors(nullptr, nullptr, MonitorEnumProc, reinterpret_cast<LPARAM>(&monitorsInfo));
+
+        // Convert collected monitor information to JSON array
+        for (const auto &monitor : monitorsInfo)
+        {
+            monitors.push_back(monitor);
+        }
+
+        // Log monitor detection results
+        systemLog("INFO", std::string("Found ") + std::to_string(monitors.size()) + " monitors");
+        systemLog("INFO", "Monitor info: " + monitors.dump());
+    }
+    catch (const std::exception &e)
+    {
+        logError("getMonitorInfo", e);
+        systemLog("ERROR", std::string("Error getting monitor info: ") + e.what());
+    }
+
+    return monitors;
+}

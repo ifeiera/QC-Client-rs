@@ -15,7 +15,6 @@
 #include <thread>
 
 // Project headers
-#include "Console.hpp"
 #include "Logger.hpp"
 #include "SystemInfoCollector.hpp"
 
@@ -23,10 +22,6 @@ int main() {
     try {
         // Basic setup
         SetConsoleOutputCP(CP_UTF8);
-        Console::initializeWindow();
-        Console::printHeader();
-
-        Console::printStatusBar("System initialized");
 
         // Message loop
         MSG msg;

@@ -49,6 +49,7 @@ private:
     static json getNetworkInfo();           // Get network adapters info
     static json getAudioInfo();             // Get audio devices info
     static json getBatteryInfo();           // Get battery status (if applicable)
+    static json getMonitorInfo();            // Get monitor information
     static void logError(const char* function, const std::exception& e);  // Error logging helper
 
 public:
