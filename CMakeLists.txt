@@ -53,7 +53,7 @@ if(WIN32)
     find_program(SIGNTOOL signtool.exe)
     if(SIGNTOOL)
         # Set certificate password directly (for development only)
-        set(CERT_PASSWORD "12317D()/")
+        set(CERT_PASSWORD "PASSWORD")
         
         # Check if certificate exists
         set(CERT_PATH "${CMAKE_SOURCE_DIR}/certs/EterninetyCert.pfx")
