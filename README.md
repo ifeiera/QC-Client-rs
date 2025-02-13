@@ -98,7 +98,3 @@ The Rust component of the Axioo QC System is responsible for capturing JSON data
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Contact
-
-For any inquiries or support, please contact [rey-design@proton.me](mailto:rey-design@proton.me).
