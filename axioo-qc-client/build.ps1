@@ -6,7 +6,7 @@ $VERSION = "0.2.0"
 
 # Certificate configuration
 $CERT_PATH = "..\certs\EterninetyCert.pfx"
-$CERT_PASSWORD = "12317D()/"
+$CERT_PASSWORD = "PASSWORD"
 
 # Configure static linking for release build
 $env:RUSTFLAGS = "-C target-feature=+crt-static"
